@@ -1,0 +1,113 @@
+name: Unified Deployment Workflow
+
+on:
+  push:
+    branches:
+      - uat  # For staging deployments
+    tags:
+      - release/[1-9]+.[0-9]+.[0-9]+  # For production deployments
+
+jobs:
+  set-environment:
+    name: Set Deployment Environment
+    runs-on: self-hosted
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+    steps:
+      - name: Set Environment
+        id: set-env
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "ENVIRONMENT=production" >> $GITHUB_ENV
+            echo "::set-output name=environment::production"
+          else
+            echo "ENVIRONMENT=staging" >> $GITHUB_ENV
+            echo "::set-output name=environment::staging"
+      - name: Debug Environment
+        run: echo "Environment is set to $ENVIRONMENT"
+
+  validate-standards:
+    name: Validate Standards
+    needs: set-environment
+    runs-on: self-hosted, staging
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: composer install
+
+      - name: Run PHPCS
+        run: ./vendor/bin/phpcs --standard=Drupal
+
+  deploy-staging:
+    name: Deployment (Staging)
+    needs: [set-environment, validate-standards]
+    if: ${{ needs.set-environment.outputs.environment == 'staging' }}
+    runs-on: self-hosted, staging
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Database Backup
+        run: |
+          ./vendor/bin/drush sql-dump --result-file=/var/www/staging/backups/dam-db-backup-$(date +'%Y-%m-%d-%H-%M').sql --gzip
+        working-directory: /var/www/staging/docroot
+
+      - name: Pull Latest Code
+        run: git pull origin uat
+        working-directory: /var/www/staging/docroot
+
+      - name: Install Dependencies
+        run: composer install --no-dev
+        working-directory: /var/www/staging/docroot
+
+      - name: Run Drush Commands
+        run: |
+          ./vendor/bin/drush updb -y
+          ./vendor/bin/drush cr
+          ./vendor/bin/drush cim -y
+          ./vendor/bin/drush cr
+        working-directory: /var/www/staging/docroot
+
+      - name: Cleanup Old Backups
+        run: |
+          ls -tp | grep -v '/$' | sed -e '1,3d' | xargs -I {} rm -f "{}"
+        working-directory: /var/www/staging/backups
+
+  deploy-production:
+    name: Deployment (Production)
+    needs: [set-environment, validate-standards]
+    if: ${{ needs.set-environment.outputs.environment == 'production' }}
+    runs-on: self-hosted, production
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Database Backup
+        run: |
+          ./vendor/bin/drush sql-dump --result-file=/var/www/production/backups/dam-db-backup-$(date +'%Y-%m-%d-%H-%M').sql --gzip
+        working-directory: /var/www/production/docroot
+
+      - name: Checkout Tag
+        run: |
+          git fetch
+          git checkout ${{ github.ref_name }}
+        working-directory: /var/www/production/docroot
+
+      - name: Install Dependencies
+        run: composer install --no-dev
+        working-directory: /var/www/production/docroot
+
+      - name: Run Drush Commands
+        run: |
+          ./vendor/bin/drush updb -y
+          ./vendor/bin/drush cr
+          ./vendor/bin/drush cim -y
+          ./vendor/bin/drush cr
+        working-directory: /var/www/production/docroot
+
+      - name: Cleanup Old Backups
+        run: |
+          ls -tp | grep -v '/$' | sed -e '1,3d' | xargs -I {} rm -f "{}"
+        working-directory: /var/www/production/backups
